@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.ottho-jarvis/
+sortie/
+*.env
+.env*

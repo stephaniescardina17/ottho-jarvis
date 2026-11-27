@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "assistant": { "nom": "Alfred" },
+  "utilisateur": { "prenom": "Camille", "adresse": "prenom", "tutoiement": true },
+  "ton": "concis",
+  "ville": { "nom": "Lyon", "lat": 45.764, "lon": 4.8357, "fuseau": "Europe/Paris" },
+  "brief": {
+    "heure": "08:00",
+    "rubriques": [
+      { "id": "meteo", "titre": "Météo", "actif": true },
+      { "id": "rappels", "titre": "Rappels du jour", "actif": true },
+      { "id": "perso_1", "titre": "Bourse", "actif": true, "consigne": "le cours de clôture du CAC 40 de la veille et sa variation" }
+    ]
+  },
+  "point_du_soir": { "actif": false },
+  "garde_fous": ["Ne jamais contacter mes clients directement."],
+  "telegram": { "actif": true, "utilisateurs": ["1000000002"] },
+  "hermes": {
+    "conteneur": "hermes-equipes",
+    "reseau": "ottho-equipes",
+    "donnees": "/opt/ottho-hermes/cellules/equipes/data"
+  }
+}

@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+# Voix de Jarvis, gratuite et locale, la même pour l'accueil et les réponses :
+# Kyutai Pocket TTS (binaire officiel, code MIT, poids CC-BY 4.0, sans PyTorch). Le binaire est
+# vérifié par empreinte SHA-256 ; le modèle français est téléchargé à la construction, puis plus
+# aucun accès réseau (HF_HUB_OFFLINE). voix.py (bibliothèque standard seule) le pilote.
+FROM python:3.12-slim
+ARG POCKET_VERSION=4.0.1
+ARG POCKET_BINAIRE=3.3.0
+ARG POCKET_LANGUE=french
+ARG TARGETARCH
+RUN mkdir /opt/pocket /modeles /voix
+RUN python - <<'EOF'
+import hashlib, io, os, tarfile, urllib.request
+arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(os.environ.get("TARGETARCH") or "amd64")
+if not arch:
+    raise SystemExit("architecture non prise en charge par Pocket TTS")
+attendus = {
+    "x86_64": "9abff0aa138a804e44052952d8c3bdaae247fb267ca8f4b83fe178897d1a0559",
+    "aarch64": "2b9a727bffd86ea6d73370d675cbd91a7db118f11b7f5a60343c2d5da12b187a",
+}
+v, b = os.environ["POCKET_VERSION"], os.environ["POCKET_BINAIRE"]
+nom = f"pocket-tts-{b}-{arch}-unknown-linux-gnu"
+donnees = urllib.request.urlopen(
+    f"https://github.com/kyutai-labs/pocket-tts/releases/download/v{v}/{nom}.tar.gz", timeout=300).read()
+if hashlib.sha256(donnees).hexdigest() != attendus[arch]:
+    raise SystemExit("empreinte inattendue pour Pocket TTS : téléchargement refusé")
+with tarfile.open(fileobj=io.BytesIO(donnees)) as t:
+    for m in t.getmembers():
+        if m.isfile() and m.name.rsplit("/", 1)[-1] in ("pocket-tts", "LICENSE"):
+            open("/opt/pocket/" + m.name.rsplit("/", 1)[-1], "wb").write(t.extractfile(m).read())
+os.chmod("/opt/pocket/pocket-tts", 0o755)
+print("Pocket TTS vérifié")
+EOF
+# Modèle français et voix d'homme intégrée (peter_yearsley, CC0), révisions figées par le binaire.
+RUN HF_HOME=/modeles /opt/pocket/pocket-tts generate --language "${POCKET_LANGUE}" --quantize \
+      --voice peter_yearsley --text "Bonjour." --output-path /tmp/essai.wav \
+    && rm -f /tmp/essai.wav && chown -R 65534:65534 /modeles
+COPY voix-pocket/ /voix/
+WORKDIR /app
+COPY voix.py /app/
+USER 65534:65534
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HF_HOME=/modeles HF_HUB_OFFLINE=1 \
+    POCKET_LANGUE=${POCKET_LANGUE}
+EXPOSE 8730
+CMD ["python", "/app/voix.py"]

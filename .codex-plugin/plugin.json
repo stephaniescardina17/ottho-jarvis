@@ -1,0 +1,27 @@
+{
+  "name": "ottho-jarvis",
+  "version": "1.0.0",
+  "description": "Installe sur ton VPS un assistant personnel type Jarvis, ajouté à ton Hermes : rappels, tâches du jour, brief du matin, second cerveau en option, bot Telegram et interface web animée en option.",
+  "author": {
+    "name": "Ottho Academy",
+    "url": "https://ottho.co"
+  },
+  "homepage": "https://ottho.co",
+  "keywords": ["ottho", "hermes-agent", "assistant", "jarvis", "telegram", "vps"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Ottho Jarvis",
+    "shortDescription": "Ton assistant personnel sur ton VPS, prêt en une séance.",
+    "longDescription": "Ajoute à ton Hermes un assistant personnel à ton nom et à ta façon : rappels, tâches notées la veille, brief du matin avec tes rubriques, point du soir, second cerveau en lecture seule, bot Telegram et, en option, une interface web avec orbe animée, protégée par mot de passe. Chaque étape est expliquée et validée avant d'être lancée.",
+    "developerName": "Ottho Academy",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://ottho.co",
+    "defaultPrompt": [
+      "Installe mon assistant personnel Jarvis sur mon VPS.",
+      "Ajoute une rubrique à mon brief du matin.",
+      "Est-ce que mon assistant marche ?"
+    ],
+    "brandColor": "#5FE1FF"
+  }
+}

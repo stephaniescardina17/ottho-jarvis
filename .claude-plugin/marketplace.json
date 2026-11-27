@@ -1,0 +1,17 @@
+{
+  "name": "ottho",
+  "owner": {
+    "name": "Ottho Academy",
+    "url": "https://ottho.co"
+  },
+  "description": "Plugins Ottho Academy pour Claude Code et Codex.",
+  "plugins": [
+    {
+      "name": "ottho-jarvis",
+      "source": "./",
+      "description": "Ton assistant personnel type Jarvis sur ton VPS : rappels, brief du matin, Telegram, interface web animée.",
+      "version": "1.0.0",
+      "category": "agents"
+    }
+  ]
+}

@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+"""Kit serveur ottho-jarvis. Installé dans /opt/ottho-jarvis, lancé en root (sudo) sur le VPS.
+
+  ottho-jarvis detecter                       conteneurs Hermes et Traefik (lecture seule, JSON)
+  ottho-jarvis generer CONFIG                 calcule les fichiers sans rien installer
+  ottho-jarvis installer CONFIG               installe ou met à jour (idempotent, sauvegarde avant)
+  ottho-jarvis redemarrer-hermes PROFIL       redémarre le conteneur Hermes (après accord)
+  ottho-jarvis jeton-telegram PROFIL          saisie masquée du jeton du bot (terminal de la personne)
+  ottho-jarvis mot-de-passe PROFIL            saisie masquée du mot de passe de l'interface
+                                              (ferme toutes les sessions ouvertes)
+  ottho-jarvis deux-facteurs-couper PROFIL    coupe la double authentification de l'interface
+                                              (téléphone perdu sans code de secours) et ferme
+                                              toutes les sessions
+  ottho-jarvis verifier PROFIL                contrôles réels (JSON)
+  ottho-jarvis statut PROFIL                  état sans rien modifier (JSON)
+  ottho-jarvis desinstaller PROFIL [--profil-hermes]
+                                              arrête les conteneurs (données gardées) ; avec
+                                              --profil-hermes, supprime aussi le profil Hermes
+
+Aucun secret n'est jamais affiché. Bibliothèque standard Python seulement.
+"""
+from __future__ import annotations
+
+import base64
+import getpass
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.dont_write_bytecode = True   # pas de __pycache__ laissé dans le kit
+KIT = Path(__file__).resolve().parents[1]
+INSTANCES = KIT / "instances"
+SAUVEGARDES = KIT / "sauvegardes"
+sys.path.insert(0, str(KIT))
+import generer  # noqa: E402
+
+PYTHON_HERMES = "/opt/hermes/.venv/bin/python"
+
+
+# --- Outils ---------------------------------------------------------------------
+
+def etape(texte: str) -> None:
+    print(f"▸ {texte}", flush=True)
+
+
+def ok(texte: str) -> None:
+    print(f"  ✓ {texte}", flush=True)
+
+
+def sh(args: list[str], *, capture: bool = True, check: bool = True, entree: str | None = None,
+       timeout: int = 600) -> subprocess.CompletedProcess:
+    r = subprocess.run(args, input=entree, text=True, capture_output=capture, timeout=timeout)
+    if check and r.returncode != 0:
+        msg = (r.stderr or r.stdout or "").strip().splitlines()[-3:]
+        raise SystemExit(f"Échec : {' '.join(args[:4])}…\n" + "\n".join(msg))
+    return r
+
+
+def docker_inspect(nom: str) -> dict:
+    return json.loads(sh(["docker", "inspect", nom]).stdout)[0]
+
+
+def lire_env(f: Path) -> dict:
+    vals = {}
+    if f.exists():
+        for ligne in f.read_text(encoding="utf-8").splitlines():
+            if "=" in ligne and not ligne.lstrip().startswith("#"):
+                k, _, v = ligne.partition("=")
+                vals[k.strip()] = v.strip()
+    return vals
+
+
+def ecrire_env(f: Path, valeurs: dict, uid: int = 0, gid: int = 0) -> None:
+    """Met à jour des clés d'un .env en gardant les autres lignes ; droits 600."""
+    lignes = f.read_text(encoding="utf-8").splitlines() if f.exists() else []
+    restantes = dict(valeurs)
+    sortie = []
+    for ligne in lignes:
+        k = ligne.partition("=")[0].strip()
+        if k in restantes:
+            sortie.append(f"{k}={restantes.pop(k)}")
+        else:
+            sortie.append(ligne)
+    sortie += [f"{k}={v}" for k, v in restantes.items()]
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_text("\n".join(sortie) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    _chown(tmp, uid, gid)
+    tmp.replace(f)
+
+
+def config_instance(profil: str) -> dict:
+    f = INSTANCES / profil / "jarvis.config.json"
+    if not f.exists():
+        raise SystemExit(f"Aucune installation « {profil} » ({f} absent).")
+    return generer.charger(str(f))
+
+
+def hermes(c: dict, *args: str, check: bool = True, entree: str | None = None) -> subprocess.CompletedProcess:
+    h = c["hermes"]
+    uid, gid = proprietaire(Path(h["donnees"]))
+    return sh(["docker", "exec", "-i", "-u", f"{uid}:{gid}", "-e", "HOME=/opt/data", h["conteneur"], *args],
+              check=check, entree=entree)
+
+
+def _chown(p, uid: int, gid: int) -> None:
+    if hasattr(os, "chown"):      # absent sous Windows (tests locaux)
+        os.chown(p, uid, gid)
+
+
+def proprietaire(p: Path) -> tuple[int, int]:
+    st = p.stat()
+    return st.st_uid, st.st_gid
+
+
+# --- Détection ------------------------------------------------------------------
+
+def detecter() -> dict:
+    lignes = sh(["docker", "ps", "--format", "{{.Names}}\t{{.Image}}"]).stdout.splitlines()
+    hermes_, traefik = [], None
+    for ligne in lignes:
+        nom, _, image = ligne.partition("\t")
+        if "hermes" in image.lower() and "jarvis" not in nom:
+            d = docker_inspect(nom)
+            donnees = next((m["Source"] for m in d["Mounts"] if m["Destination"] == "/opt/data"), None)
+            if not donnees:
+                continue
+            racine = Path(donnees)
+            cfg = (racine / "config.yaml").read_text(encoding="utf-8", errors="replace") if (racine / "config.yaml").exists() else ""
+            env = lire_env(racine / ".env")
+            profils = sorted(p.name for p in (racine / "profiles").iterdir() if p.is_dir()) if (racine / "profiles").is_dir() else []
+            hermes_.append({
+                "conteneur": nom, "image": image,
+                "reseaux": sorted(d["NetworkSettings"]["Networks"].keys()),
+                "donnees": donnees,
+                "profils": ["default"] + profils,
+                "multiplex": bool(re.search(r"^\s*multiplex_profiles:\s*true", cfg, re.M)),
+                "fournisseur": (re.search(r"^\s*provider:\s*(\S+)", cfg, re.M) or [None, None])[1],
+                "api_cle_presente": bool(env.get("API_SERVER_KEY")),
+                "api_ouverte_reseau": env.get("API_SERVER_HOST") == "0.0.0.0",
+                "uid": proprietaire(racine)[0],
+            })
+        elif "traefik" in image.lower():
+            d = docker_inspect(nom)
+            args = " ".join(d["Config"].get("Cmd") or []) + " " + " ".join(d["Args"] or [])
+            traefik = {
+                "conteneur": nom,
+                "certresolvers": sorted(set(re.findall(r"--certificatesresolvers\.([A-Za-z0-9_-]+)\.", args))),
+                "entrypoints_https": sorted(set(re.findall(r"--entrypoints\.([A-Za-z0-9_-]+)\.address=:443", args))),
+                "domaines_vus": sorted(set(re.findall(r"Host\(`([^`]+)`\)", json.dumps(
+                    [docker_inspect(n.partition("\t")[0])["Config"].get("Labels") or {} for n in lignes])))),
+            }
+    return {"hermes": hermes_, "traefik": traefik}
+
+
+# --- Installation -----------------------------------------------------------------
+
+FUSION_YAML = r'''
+import json, os, shutil, sys, tempfile
+from ruamel.yaml import YAML
+reglages, chemin = json.loads(sys.argv[1]), sys.argv[2]
+y = YAML()
+y.preserve_quotes = True
+cfg = {}
+if os.path.exists(chemin):
+    with open(chemin, encoding="utf-8") as f:
+        cfg = y.load(f) or {}
+    if not os.path.exists(chemin + ".bak-ottho-jarvis"):
+        shutil.copy2(chemin, chemin + ".bak-ottho-jarvis")
+def fusion(a, b):
+    for k, v in b.items():
+        if isinstance(v, dict) and isinstance(a.get(k), dict):
+            fusion(a[k], v)
+        else:
+            a[k] = v
+fusion(cfg, reglages)
+ap = cfg.setdefault("approvals", {})
+if str(ap.get("mode", "")).lower() in ("off", "", "none"):
+    ap["mode"] = "smart"          # jamais d'approbation désactivée
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(chemin))
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    y.dump(cfg, f)
+os.chmod(tmp, 0o640)
+os.replace(tmp, chemin)
+print("ok")
+'''
+
+
+def sauvegarder(c: dict) -> Path:
+    h = c["hermes"]
+    pr = h["profil"]
+    SAUVEGARDES.mkdir(parents=True, exist_ok=True)
+    os.chmod(SAUVEGARDES, 0o700)
+    f = SAUVEGARDES / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{pr}.tgz"
+    racine = Path(h["donnees"])
+    with tarfile.open(f, "w:gz") as t:
+        for chemin in [racine / ".env", racine / "config.yaml", racine / "profiles" / pr / "config.yaml",
+                       racine / "profiles" / pr / "SOUL.md", racine / "profiles" / pr / ".env",
+                       racine / "profiles" / pr / "cron" / "jobs.json", INSTANCES / pr / "compose.yml",
+                       INSTANCES / pr / ".env", INSTANCES / pr / "jarvis.config.json"]:
+            if chemin.exists():
+                t.add(chemin, arcname=str(chemin).lstrip("/"))
+    os.chmod(f, 0o600)
+    return f
+
+
+def installer(config_path: str) -> dict:
+    c = generer.charger(config_path)
+    h, i, pr = c["hermes"], c["interface"], c["hermes"]["profil"]
+    racine = Path(h["donnees"])
+    profil_dir = racine / "profiles" / pr
+    inst = INSTANCES / pr
+    uid, gid = proprietaire(racine)
+    redemarrage = False
+
+    etape("Contrôles préalables")
+    d = docker_inspect(h["conteneur"])
+    if not d["State"]["Running"]:
+        raise SystemExit(f"Le conteneur {h['conteneur']} ne tourne pas.")
+    if h["reseau"] not in d["NetworkSettings"]["Networks"]:
+        raise SystemExit(f"Le conteneur {h['conteneur']} n'est pas sur le réseau {h['reseau']}.")
+    if not (racine / "config.yaml").exists():
+        raise SystemExit(f"{racine}/config.yaml introuvable : hermes.donnees est-il le dossier monté sur /opt/data ?")
+    if c["second_cerveau"]["actif"] and not Path(c["second_cerveau"]["chemin"]).is_dir():
+        raise SystemExit(f"Second cerveau introuvable : {c['second_cerveau']['chemin']}")
+    ok("Hermes, réseau et dossiers présents")
+
+    etape("Sauvegarde")
+    ok(str(sauvegarder(c)))
+
+    etape("Génération des fichiers")
+    inst.mkdir(parents=True, exist_ok=True)
+    os.chmod(inst, 0o750)
+    if Path(config_path).resolve() != (inst / "jarvis.config.json").resolve():
+        shutil.copy2(config_path, inst / "jarvis.config.json")
+    gen = inst / "gen"
+    generer.generer(str(inst / "jarvis.config.json"), gen)
+    ok(str(gen))
+
+    etape("Services (conteneurs)")
+    for f in ("serveur.py", "web.py", "qr.py", "politesse.py", "voix.py", "connexion.html", "connexion.js", "securite.html", "securite.js", "Dockerfile", "Dockerfile.voix"):
+        shutil.copy2(KIT / "services" / f, inst / f)
+    (inst / "voix-pocket").mkdir(exist_ok=True)        # voix exportées pour Pocket TTS
+    for f in (KIT / "services" / "voix-pocket").iterdir():
+        shutil.copy2(f, inst / "voix-pocket" / f.name)
+    shutil.copy2(gen / "services" / "compose.yml", inst / "compose.yml")
+    (inst / "web").mkdir(exist_ok=True)
+    for f in (KIT / "web").iterdir():
+        if f.is_dir():                                   # sons/ : sons de l'interface
+            shutil.copytree(f, inst / "web" / f.name, dirs_exist_ok=True)
+        else:
+            shutil.copy2(f, inst / "web" / f.name)
+    shutil.copy2(gen / "web" / "jarvis.config.json", inst / "web" / "jarvis.config.json")
+    (inst / "data").mkdir(exist_ok=True)
+    _chown(inst / "data", 65534, 65534)
+    (inst / "data" / "web" / "musique").mkdir(parents=True, exist_ok=True)
+    for p in (inst / "data" / "web", inst / "data" / "web" / "musique"):
+        _chown(p, uid, gid)
+    os.chmod(inst / "data" / "web", 0o700)
+    env = lire_env(inst / ".env")
+    nouveaux = {k: secrets.token_hex(32) for k in ("JARVIS_MCP_TOKEN", "JARVIS_API_KEY", "SESSION_SECRET") if not env.get(k)}
+    ecrire_env(inst / ".env", nouveaux)
+    env = lire_env(inst / ".env")
+    ok(f"{inst} (secrets générés : {', '.join(nouveaux) or 'aucun, déjà présents'})")
+
+    etape(f"Profil Hermes « {pr} »")
+    if not profil_dir.is_dir():
+        hermes(c, "hermes", "profile", "create", pr, "--clone-from", "default",
+               "--description", f"Assistant personnel {c['assistant']['nom']} (ottho-jarvis)")
+        ok("profil créé (copie du profil default, sans ses bots)")
+        redemarrage = True
+    else:
+        ok("profil déjà présent : mis à jour")
+    (profil_dir / "SOUL.md").write_text((gen / "profil" / "SOUL.md").read_text(encoding="utf-8"), encoding="utf-8")
+    _chown(profil_dir / "SOUL.md", uid, gid)
+    reglages = (gen / "profil" / "reglages.json").read_text(encoding="utf-8")
+    r = hermes(c, PYTHON_HERMES, "-c", FUSION_YAML, json.dumps(json.loads(reglages)), f"/opt/data/profiles/{pr}/config.yaml")
+    ok("personnalité et réglages appliqués (modèle et fournisseur inchangés)" if "ok" in r.stdout else r.stdout)
+    valeurs = {"JARVIS_MCP_TOKEN": env["JARVIS_MCP_TOKEN"], "API_SERVER_KEY": env["JARVIS_API_KEY"]}
+    if c["telegram"]["actif"]:
+        valeurs["TELEGRAM_ALLOWED_USERS"] = ",".join(c["telegram"]["utilisateurs"])
+        valeurs["TELEGRAM_HOME_CHANNEL"] = c["telegram"]["utilisateurs"][0]
+    avant = lire_env(profil_dir / ".env")
+    if any(avant.get(k) != v for k, v in valeurs.items()):
+        redemarrage = True
+    ecrire_env(profil_dir / ".env", valeurs, uid, gid)
+    for sous in ("pending/memory", "pending/skills", "memories", "cron", "skills", "logs"):
+        (profil_dir / sous).mkdir(parents=True, exist_ok=True)
+        _chown(profil_dir / sous, uid, gid)
+    _chown(profil_dir / "pending", uid, gid)
+    base = sorted({p.parent.name for p in (profil_dir / "skills").rglob("SKILL.md")})
+    f_base = inst / "data" / "web" / "skills-de-base.txt"
+    if not f_base.exists():
+        f_base.write_text("\n".join(base) + "\n", encoding="utf-8")
+        _chown(f_base, uid, gid)
+    ok("variables du profil écrites (valeurs non affichées)")
+
+    if i["active"]:
+        etape("API Hermes joignable par l'interface (réseau Docker interne seulement)")
+        env_racine = lire_env(racine / ".env")
+        ajout = {}
+        if env_racine.get("API_SERVER_HOST") != "0.0.0.0":
+            ajout["API_SERVER_HOST"] = "0.0.0.0"
+        if not env_racine.get("API_SERVER_KEY"):
+            ajout["API_SERVER_KEY"] = secrets.token_hex(32)
+        if ajout:
+            ecrire_env(racine / ".env", ajout, *proprietaire(racine / ".env") if (racine / ".env").exists() else (uid, gid))
+            redemarrage = True
+            ok(f"ajouté au profil default : {', '.join(ajout)}")
+        else:
+            ok("déjà en place")
+
+    etape("Construction et démarrage des conteneurs")
+    r = subprocess.run(["docker", "compose", "build", "-q"], cwd=inst, capture_output=True, text=True, timeout=900)
+    if r.returncode:
+        raise SystemExit("Construction impossible :\n" + r.stderr[-800:])
+    r = subprocess.run(["docker", "compose", "up", "-d", "--remove-orphans"], cwd=inst, capture_output=True, text=True, timeout=300)
+    if r.returncode:
+        raise SystemExit("Démarrage impossible :\n" + r.stderr[-800:])
+    ok("conteneurs lancés")
+
+    etape("Routines")
+    existants = hermes(c, "hermes", "-p", pr, "cron", "list", check=False).stdout
+    routines = json.loads((gen / "routines.json").read_text(encoding="utf-8"))
+    for rt in routines:
+        if re.search(rf"Name:\s+{re.escape(rt['nom'])}\b", existants):
+            ok(f"{rt['nom']} déjà présente (pour changer son horaire : la supprimer puis relancer l'installation)")
+            continue
+        hermes(c, "hermes", "-p", pr, "cron", "create", "--name", rt["nom"], "--deliver", rt["livraison"],
+               "--timezone", rt["fuseau"], "--catch-up", "off", rt["horaire"], rt["consigne"])
+        ok(f"{rt['nom']} créée ({rt['horaire']})")
+
+    resultat = {"installe": True, "profil": pr, "redemarrage_requis": redemarrage,
+                "jeton_telegram_present": bool(lire_env(profil_dir / ".env").get("TELEGRAM_BOT_TOKEN")),
+                "mot_de_passe_present": bool(lire_env(inst / ".env").get("JARVIS_PASSWORD_HASH")),
+                "interface": f"https://{i['domaine']}" if i["active"] else None}
+    print(json.dumps(resultat, ensure_ascii=False))
+    return resultat
+
+
+def redemarrer_hermes(profil: str) -> None:
+    c = config_instance(profil)
+    nom = c["hermes"]["conteneur"]
+    etape(f"Redémarrage de {nom}")
+    sh(["docker", "restart", nom], timeout=180)
+    for n in range(60):
+        time.sleep(3)
+        r = sh(["docker", "exec", nom, PYTHON_HERMES, "-c",
+                f"import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:{c['hermes']['port_api']}/health',timeout=3).status)"],
+               check=False)
+        if r.stdout.strip() == "200":
+            ok(f"Hermes répond après {3 * (n + 1)} s")
+            return
+    raise SystemExit("Hermes ne répond pas après 3 minutes : voir docker logs.")
+
+
+# --- Secrets saisis par la personne ------------------------------------------------
+
+def jeton_telegram(profil: str) -> None:
+    c = config_instance(profil)
+    racine = Path(c["hermes"]["donnees"])
+    jeton = getpass.getpass("Colle le jeton du bot (donné par BotFather), puis Entrée : ").strip()
+    if not re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", jeton):
+        raise SystemExit("Ce n'est pas un jeton BotFather valide (format 123456:ABC…). Rien n'a été écrit.")
+    f = racine / "profiles" / profil / ".env"
+    ecrire_env(f, {"TELEGRAM_BOT_TOKEN": jeton}, *proprietaire(racine))
+    print("Jeton enregistré (non affiché). Hermes devra redémarrer pour connecter le bot.")
+
+
+def mot_de_passe(profil: str) -> None:
+    config_instance(profil)
+    a = getpass.getpass("Nouveau mot de passe de l'interface (12 caractères ou plus) : ")
+    b = getpass.getpass("Encore une fois : ")
+    if a != b:
+        raise SystemExit("Les deux saisies diffèrent. Rien n'a changé.")
+    if len(a) < 12:
+        raise SystemExit("Trop court (12 caractères au moins). Rien n'a changé.")
+    sel = os.urandom(16)
+    h = hashlib.scrypt(a.encode(), salt=sel, n=16384, r=8, p=1, dklen=32)
+    empreinte = f"scrypt:16384:8:1:{base64.b64encode(sel).decode()}:{base64.b64encode(h).decode()}"
+    inst = INSTANCES / profil
+    ecrire_env(inst / ".env", {"JARVIS_PASSWORD_HASH": empreinte})
+    modifier_securite(profil, lambda d: None)      # nouvelle génération : sessions fermées
+    subprocess.run(["docker", "compose", "up", "-d", "--force-recreate", "web"], cwd=inst, capture_output=True, timeout=300)
+    print("Mot de passe enregistré (seule son empreinte est gardée). L'interface a redémarré ; "
+          "toutes les sessions ouvertes sont fermées.")
+
+
+# --- Double authentification de l'interface (data/web/securite.json, lu par <profil>-web) ---
+
+def modifier_securite(profil: str, changement) -> dict:
+    """Applique `changement(d)` à securite.json, augmente la génération (toutes les sessions
+    ouvertes sont refusées), garde le propriétaire du dossier et les droits 600."""
+    dossier = INSTANCES / profil / "data" / "web"
+    dossier.mkdir(parents=True, exist_ok=True)
+    f = dossier / "securite.json"
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    changement(d)
+    d["generation"] = int(d.get("generation", 0)) + 1
+    tmp = f.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as sortie:
+        json.dump(d, sortie, indent=1)
+    os.chown(tmp, *proprietaire(dossier))
+    os.replace(tmp, f)
+    return d
+
+
+def deux_facteurs_couper(profil: str) -> None:
+    config_instance(profil)
+    def couper(d):
+        for k in ("totp", "en_attente"):
+            d.pop(k, None)
+        d["secours"] = []
+    modifier_securite(profil, couper)
+    print("Double authentification coupée et sessions fermées. À la prochaine connexion : mot de passe, "
+          "puis nouvelle activation (obligatoire si interface.deux_facteurs vaut « maintenant »).")
+
+
+def deux_facteurs_actifs(profil: str) -> bool:
+    try:
+        d = json.loads((INSTANCES / profil / "data" / "web" / "securite.json").read_text(encoding="utf-8"))
+        return bool((d.get("totp") or {}).get("secret"))
+    except (OSError, ValueError):
+        return False
+
+
+# --- Vérification et état -----------------------------------------------------------
+
+def sante(nom: str) -> str:
+    r = sh(["docker", "inspect", "-f", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", nom], check=False)
+    return r.stdout.strip() or "absent"
+
+
+def verifier(profil: str) -> list:
+    c = config_instance(profil)
+    h, i = c["hermes"], c["interface"]
+    inst = INSTANCES / profil
+    env = lire_env(inst / ".env")
+    res = []
+
+    def note(nom, bon, detail=""):
+        res.append({"controle": nom, "ok": bool(bon), "detail": detail})
+
+    for nom in [f"{profil}-services"] + ([f"{profil}-web"] if i["active"] else []):
+        s = sante(nom)
+        note(f"conteneur {nom}", s == "healthy", s)
+        ports = sh(["docker", "port", nom], check=False).stdout.strip()
+        note(f"aucun port publié par {nom}", not ports, ports or "aucun")
+    r = hermes(c, "hermes", "-p", profil, "mcp", "test", "jarvis", check=False)
+    m = re.search(r"Tools discovered:\s*(\d+)", r.stdout)
+    note("outils MCP vus par Hermes", m and int(m.group(1)) >= 4, f"{m.group(1) if m else 0} outils")
+    code = (f"import urllib.request as u,sys\n"
+            f"def t(p,k):\n"
+            f"  q=u.Request('http://{h['conteneur']}:{h['port_api']}'+p,headers={{'Authorization':'Bearer '+k}})\n"
+            f"  try: return u.urlopen(q,timeout=8).status\n"
+            f"  except Exception as e: return getattr(e,'code',0)\n"
+            f"print(t('/p/{profil}/v1/models',sys.argv[1]), t('/v1/models',sys.argv[1]))")
+    if i["active"]:
+        r = sh(["docker", "exec", f"{profil}-web", "python", "-c", code, env.get("JARVIS_API_KEY", "")], check=False)
+        codes = r.stdout.split()
+        note("API du profil joignable avec sa clé", codes[:1] == ["200"], " ".join(codes) or r.stderr[-120:])
+        note("la clé du profil n'ouvre pas le profil default", codes[1:2] == ["401"], " ".join(codes))
+    crons = hermes(c, "hermes", "-p", profil, "cron", "list", check=False).stdout
+    for rt in generer.routines(c):
+        note(f"routine {rt['nom']}", re.search(rf"Name:\s+{re.escape(rt['nom'])}\b", crons), rt["horaire"])
+    penv = lire_env(Path(h["donnees"]) / "profiles" / profil / ".env")
+    if c["telegram"]["actif"]:
+        note("jeton du bot Telegram présent", penv.get("TELEGRAM_BOT_TOKEN"), "oui" if penv.get("TELEGRAM_BOT_TOKEN") else "à saisir")
+        log = Path(h["donnees"]) / "profiles" / profil / "logs" / "gateway.log"
+        derniere = ""
+        if log.exists():
+            lignes = [l for l in log.read_text(encoding="utf-8", errors="replace").splitlines()[-400:] if "Connected to Telegram" in l]
+            derniere = lignes[-1][:19] if lignes else ""
+        note("bot connecté à Telegram", derniere, derniere or "aucune connexion dans le journal")
+    if i["active"]:
+        note("mot de passe de l'interface défini", env.get("JARVIS_PASSWORD_HASH"), "oui" if env.get("JARVIS_PASSWORD_HASH") else "à saisir")
+        for chemin, attendu in (("/", 200), ("/api/donnees", 401)):
+            try:
+                code_ = urllib.request.urlopen(f"https://{i['domaine']}{chemin}", timeout=10).status
+            except urllib.error.HTTPError as e:
+                code_ = e.code
+            except Exception as e:  # noqa: BLE001
+                code_ = type(e).__name__
+            note(f"https://{i['domaine']}{chemin} → {attendu}", code_ == attendu, str(code_))
+    print(json.dumps(res, ensure_ascii=False, indent=1))
+    return res
+
+
+def statut(profil: str) -> dict:
+    c = config_instance(profil)
+    inst = INSTANCES / profil
+    env, penv = lire_env(inst / ".env"), lire_env(Path(c["hermes"]["donnees"]) / "profiles" / profil / ".env")
+    s = {"profil": profil, "assistant": c["assistant"]["nom"], "conteneur_hermes": c["hermes"]["conteneur"],
+         "services": sante(f"{profil}-services"),
+         "web": sante(f"{profil}-web") if c["interface"]["active"] else "désactivée",
+         "interface": f"https://{c['interface']['domaine']}" if c["interface"]["active"] else None,
+         "second_cerveau": c["second_cerveau"]["chemin"] if c["second_cerveau"]["actif"] else None,
+         "jeton_telegram_present": bool(penv.get("TELEGRAM_BOT_TOKEN")),
+         "mot_de_passe_present": bool(env.get("JARVIS_PASSWORD_HASH")),
+         "deux_facteurs": ("activée" if deux_facteurs_actifs(profil) else "à activer : " + c["interface"].get("deux_facteurs", "maintenant").replace("_", " "))
+                          if c["interface"]["active"] else None,
+         "voix": sante(f"{profil}-voix") if c["interface"]["active"] and c["interface"].get("voix_locale", True) else "désactivée",
+         "sauvegardes": sorted(p.name for p in SAUVEGARDES.glob(f"*-{profil}.tgz"))[-5:] if SAUVEGARDES.exists() else []}
+    print(json.dumps(s, ensure_ascii=False, indent=1))
+    return s
+
+
+def desinstaller(profil: str, profil_hermes: bool) -> None:
+    c = config_instance(profil)
+    etape("Sauvegarde")
+    ok(str(sauvegarder(c)))
+    etape("Arrêt des conteneurs (données gardées dans " + str(INSTANCES / profil) + ")")
+    subprocess.run(["docker", "compose", "down"], cwd=INSTANCES / profil, capture_output=True, timeout=300)
+    ok("arrêtés")
+    if profil_hermes:
+        etape(f"Suppression du profil Hermes « {profil} »")
+        hermes(c, "hermes", "profile", "delete", "-y", profil)
+        ok("profil supprimé (sauvegarde de sa configuration ci-dessus)")
+
+
+def main(argv: list[str]) -> int:
+    if os.geteuid() != 0:
+        print("À lancer en root (sudo).", file=sys.stderr)
+        return 2
+    if len(argv) < 2 or argv[1] in ("-h", "--help", "aide"):
+        print(__doc__)
+        return 0
+    cmd, args = argv[1], argv[2:]
+    try:
+        if cmd == "detecter":
+            print(json.dumps(detecter(), ensure_ascii=False, indent=1))
+        elif cmd == "generer" and len(args) == 1:
+            sortie = Path("/tmp") / f"ottho-jarvis-gen-{os.getpid()}"
+            print(json.dumps(generer.generer(args[0], sortie), ensure_ascii=False, indent=1))
+            print(f"Fichiers dans {sortie}")
+        elif cmd == "installer" and len(args) == 1:
+            installer(args[0])
+        elif cmd == "redemarrer-hermes" and len(args) == 1:
+            redemarrer_hermes(args[0])
+        elif cmd == "jeton-telegram" and len(args) == 1:
+            jeton_telegram(args[0])
+        elif cmd == "mot-de-passe" and len(args) == 1:
+            mot_de_passe(args[0])
+        elif cmd == "deux-facteurs-couper" and len(args) == 1:
+            deux_facteurs_couper(args[0])
+        elif cmd == "verifier" and len(args) == 1:
+            res = verifier(args[0])
+            return 0 if all(r["ok"] for r in res) else 1
+        elif cmd == "statut" and len(args) == 1:
+            statut(args[0])
+        elif cmd == "desinstaller" and args:
+            desinstaller(args[0], "--profil-hermes" in args[1:])
+        else:
+            print(__doc__)
+            return 2
+    except generer.ConfigInvalide as e:
+        print("Configuration invalide :\n" + str(e), file=sys.stderr)
+        return 2
+    except SystemExit as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

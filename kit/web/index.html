@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#04080b">
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <title>{{NOM}}</title>
+  <!-- Préchargeur : styles en ligne, peints avant tout le reste (pas de page blanche) -->
+  <style>
+    html { background: #04080b; }
+    #preloader {
+      position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center;
+      /* fond à 98,5 % opaque, pas 100 % : Chrome ne dessine pas ce qui est entièrement caché ;
+         il dessinait toute la page d'un coup quand le préchargeur s'effaçait (écran figé 250 ms,
+         puis tout « saute »). Ainsi la page est déjà prête dessous. */
+      background: radial-gradient(60% 55% at 50% 45%, rgba(95, 225, 255, 0.08), transparent 70%), rgba(4, 8, 11, 0.985);
+      color: #5fe1ff;
+      animation: pl-secours 0.7s ease 20s forwards;   /* filet de sécurité si le script échoue */
+    }
+    /* sortie par une animation qui garde son état final (forwards), et non par une transition :
+       à la fin d'une transition, Firefox et Zen réaffichaient ~100 ms le préchargeur en entier
+       (l'écran « disparaissait » derrière lui). L'élément est retiré à la fin de l'animation. */
+    #preloader.fini { animation: pl-sortie 0.7s ease forwards; pointer-events: none; }
+    @keyframes pl-sortie { from { opacity: 1; } to { opacity: 0; visibility: hidden; } }
+    .pl { display: grid; justify-items: center; gap: 18px; }
+    .pl-anneau { position: relative; width: 88px; height: 88px; }
+    .pl-anneau svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    /* seul l'anneau tourne (animation gérée par le compositeur : fluide même pendant le chargement) */
+    .pl-tour { animation: pl-tour 1.6s linear infinite; transform-origin: 50% 50%; will-change: transform; }
+    .pl-nom { font: 500 13px/1 ui-monospace, "JetBrains Mono", monospace; letter-spacing: 0.34em; color: #d6eef4; padding-left: 0.34em; }
+    .pl-ligne { display: flex; align-items: center; gap: 12px; }
+    .pl-barre { width: 160px; height: 2px; background: rgba(120, 220, 240, 0.15); overflow: hidden; border-radius: 2px; }
+    .pl-barre i { display: block; width: 100%; height: 100%; background: #5fe1ff; box-shadow: 0 0 8px #5fe1ff; transform: scaleX(0); transform-origin: left center; }
+    .pl-pct { min-width: 4.2ch; font: 500 11px/1 ui-monospace, "JetBrains Mono", monospace; color: #8fdcf0; font-variant-numeric: tabular-nums; text-align: right; }
+    @keyframes pl-tour { to { transform: rotate(360deg); } }
+    @keyframes pl-secours { to { opacity: 0; visibility: hidden; } }
+    @media (prefers-reduced-motion: reduce) { .pl-tour { animation: none; } }
+  </style>
+  <link rel="stylesheet" href="styles.css?v=38">
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+  </script>
+</head>
+<body class="avant-allumage">
+  <div id="preloader" role="status" aria-label="Chargement de {{NOM}}">
+    <div class="pl">
+      <div class="pl-anneau" aria-hidden="true">
+        <svg class="pl-tour" viewBox="0 0 88 88"><circle cx="44" cy="44" r="42" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="66 198" stroke-linecap="round"/></svg>
+        <svg viewBox="0 0 88 88"><circle cx="44" cy="44" r="42" fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/></svg>
+        <svg viewBox="0 0 88 88"><path d="M44 28 57.9 36v16L44 60l-13.9-8V36Z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="44" cy="44" r="4.6" fill="currentColor"/></svg>
+      </div>
+      <span class="pl-nom">{{NOM_MAJ}}</span>
+      <span class="pl-ligne">
+        <span class="pl-barre"><i id="pl-barre-i"></i></span>
+        <span class="pl-pct" id="pl-pct">0 %</span>
+      </span>
+    </div>
+  </div>
+  <script src="preload.js?v=5"></script>
+  <!-- polices chargées après le préchargeur, pour qu'il s'affiche tout de suite -->
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <div class="bg" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 2.5 27.7 9.25v13.5L16 29.5 4.3 22.75V9.25Z" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <circle cx="16" cy="16" r="4.2" fill="currentColor"/>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-name" id="brand-name">{{NOM_MAJ}}</span>
+        <span class="brand-sub">Assistant personnel</span>
+      </div>
+    </div>
+
+    <div class="clock" aria-live="off">
+      <span id="clock-hm">--:--</span><span class="clock-s" id="clock-s">00</span>
+    </div>
+
+    <div class="top-right">
+      <!-- Lecteur de musique -->
+      <div class="player" id="player" data-empty="true">
+        <button type="button" class="player-btn" id="p-play" aria-label="Lecture">
+          <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5Z"/></svg>
+          <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13M16 5.5v13"/></svg>
+        </button>
+        <div class="player-info">
+          <span class="player-title" id="p-title">Musique</span>
+          <span class="player-artist" id="p-artist">Ajoutez un MP3</span>
+          <span class="player-bar" aria-hidden="true"><i id="p-progress"></i></span>
+        </div>
+        <span class="player-eq" aria-hidden="true"><i></i><i></i><i></i></span>
+        <audio id="p-audio" preload="metadata"></audio>
+      </div>
+
+      <ul class="status" aria-label="État des services">
+        <li id="st-hermes" title="Hermes : en attente"><i class="dot"></i>Hermes</li>
+        <li id="st-telegram" title="Telegram : en attente"><i class="dot"></i>Telegram</li>
+      </ul>
+
+      <button type="button" class="icon-btn" id="open-settings" aria-label="Réglages" aria-haspopup="dialog" aria-controls="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Colonne gauche -->
+    <section class="col col-left">
+      <div class="greeting">
+        <p class="eyebrow" id="date-line">—</p>
+        <h1 id="greet" aria-label="Bonjour, {{ADRESSE}}."><span id="greet-word">Bonjour</span><span id="greet-comma">,</span><br> <em id="greet-name">{{ADRESSE}}.</em></h1>
+        <p class="lede" id="lede">Je suis prêt. Demandez-moi ce que vous voulez, ou laissez-moi un rappel.</p>
+      </div>
+
+      <article class="panel weather" id="weather">
+        <header class="panel-head">
+          <h2>Météo</h2><span class="panel-meta" id="w-place">Nice</span>
+        </header>
+        <div class="w-now">
+          <div class="w-icon" id="w-icon" aria-hidden="true"></div>
+          <div class="w-temp"><span id="w-temp">--</span><sup>°C</sup></div>
+          <div class="w-desc">
+            <span id="w-label">Chargement…</span>
+            <span class="muted" id="w-feel">&nbsp;</span>
+          </div>
+        </div>
+        <dl class="w-stats">
+          <div><dt>Min / max</dt><dd id="w-minmax">–</dd></div>
+          <div><dt>Vent</dt><dd id="w-wind">–</dd></div>
+          <div><dt>Humidité</dt><dd id="w-hum">–</dd></div>
+        </dl>
+        <ol class="w-hours" id="w-hours"></ol>
+        <ol class="w-days" id="w-days"></ol>
+      </article>
+    </section>
+
+    <!-- Centre -->
+    <section class="col col-center">
+      <div class="core" id="core">
+        <!-- trois couches : cercle gradué (extérieur), grands arcs, cercle pointillé (contre la sphère) ;
+             plus une couronne de segments qui se remplit au chargement -->
+        <svg class="hud" viewBox="0 0 400 400" aria-hidden="true">
+          <g class="hud-ticks"></g>
+          <circle class="hud-ring r1" cx="200" cy="200" r="172"/>
+          <g class="hud-charge"></g>
+          <circle class="hud-arc a1 grand" cx="200" cy="200" r="134" pathLength="360"/>
+          <circle class="hud-arc a3 grand" cx="200" cy="200" r="134" pathLength="360"/>
+          <circle class="hud-arc a4 grand" cx="200" cy="200" r="134" pathLength="360"/>
+          <circle class="hud-arc a2" cx="200" cy="200" r="120"/>
+        </svg>
+        <canvas id="orb" aria-label="Animation de {{NOM}}"></canvas>
+        <!-- quatre indicateurs d'état du VPS, reliés à la sphère par un trait -->
+        <svg class="hud-info" id="hud-info" aria-label="État du serveur"></svg>
+      </div>
+      <p class="core-state" id="core-state" aria-live="polite"><i class="dot ok"></i><span>En veille</span></p>
+
+      <div class="transcript" id="transcript" aria-live="polite"></div>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <button type="button" class="icon-btn" id="mic" aria-label="Parler à {{NOM}}" title="Parler (conversation : « merci {{NOM}} » pour finir)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+        </button>
+        <input id="prompt" name="prompt" type="text" placeholder="Écrire à {{NOM}}…" aria-label="Message pour {{NOM}}" enterkeyhint="send">
+        <button type="button" class="icon-btn" id="voice" aria-pressed="false" aria-label="Réponses à voix haute" title="Voix">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5Z"/><path class="wave" d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>
+        </button>
+        <button type="submit" class="send" aria-label="Envoyer">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6.5 18.5 12 13 17.5"/></svg>
+        </button>
+      </form>
+    </section>
+
+    <!-- Colonne droite : deux onglets -->
+    <section class="col col-right">
+      <div class="tabs" role="tablist" aria-label="Panneaux">
+        <button type="button" role="tab" id="tab-today" aria-selected="true" aria-controls="pane-today">Aujourd’hui</button>
+        <button type="button" role="tab" id="tab-jarvis" aria-selected="false" aria-controls="pane-jarvis"><span data-name>{{NOM}}</span></button>
+      </div>
+
+      <div class="pane" id="pane-today" role="tabpanel" aria-labelledby="tab-today">
+        <article class="panel reminders">
+          <header class="panel-head">
+            <h2>Rappels</h2><span class="panel-meta" id="r-count">0</span>
+          </header>
+          <ul class="r-list" id="r-list"></ul>
+        </article>
+
+        <article class="panel todo">
+          <header class="panel-head">
+            <h2>Tâches du jour</h2><span class="panel-meta" id="t-count">0/0</span>
+          </header>
+          <p class="panel-hint">Notées hier, reprises ce matin.</p>
+          <ul class="todo-list" id="todo-list"></ul>
+        </article>
+
+        <article class="panel brief">
+          <header class="panel-head">
+            <h2>Brief du matin</h2><span class="panel-meta" id="b-hour">07:30</span>
+          </header>
+          <ul class="b-list" id="b-list"></ul>
+        </article>
+      </div>
+
+      <div class="pane" id="pane-jarvis" role="tabpanel" aria-labelledby="tab-jarvis" hidden>
+        <article class="panel memory">
+          <header class="panel-head">
+            <h2 id="mem-title">Ce que je sais de vous</h2><span class="panel-meta" id="m-count">0</span>
+          </header>
+          <ul class="m-pending" id="m-pending"></ul>
+          <ul class="m-list" id="m-list"></ul>
+        </article>
+
+        <article class="panel skills">
+          <header class="panel-head">
+            <h2>Savoir-faire</h2><span class="panel-meta" id="s-count">0</span>
+          </header>
+          <p class="panel-hint" id="skills-hint">Dites « retiens comment on a fait » après une tâche réussie.</p>
+          <ul class="s-list" id="s-list"></ul>
+        </article>
+
+        <article class="panel tasks">
+          <header class="panel-head">
+            <h2>Routines</h2><span class="panel-meta">02</span>
+          </header>
+          <ul class="t-list" id="routine-list">
+            <li><span class="t-time">07:30</span><span class="t-name">Brief du matin</span><span class="t-chan">Telegram</span></li>
+            <li><span class="t-time">20:00</span><span class="t-name">Point du soir sur les rappels</span><span class="t-chan">Telegram</span></li>
+          </ul>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <!-- Réglages -->
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="settings" id="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+    <header class="settings-head">
+      <h2 id="settings-title">Réglages</h2>
+      <button type="button" class="icon-btn" id="close-settings" aria-label="Fermer">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </header>
+    <div class="settings-body" id="settings-body">
+      <fieldset class="field">
+        <legend>Comment je m’adresse à vous</legend>
+        <div class="seg" id="set-adresse">
+          <button type="button" data-v="Monsieur">Monsieur</button>
+          <button type="button" data-v="Madame">Madame</button>
+          <button type="button" data-v="prenom">Prénom</button>
+        </div>
+        <label class="input-row" id="row-prenom">
+          <span>Prénom</span>
+          <input type="text" id="set-prenom" maxlength="30" autocomplete="given-name">
+        </label>
+        <label class="switch-row">
+          <span>Tutoiement</span>
+          <input type="checkbox" id="set-tu" role="switch">
+        </label>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>Longueur des réponses</legend>
+        <div class="seg" id="set-ton">
+          <button type="button" data-v="concis">Concis</button>
+          <button type="button" data-v="equilibre">Équilibré</button>
+          <button type="button" data-v="bavard">Détaillé</button>
+        </div>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>Couleur</legend>
+        <div class="swatches" id="set-accent">
+          <button type="button" data-v="cyan" style="--c:#5fe1ff" aria-label="Cyan"></button>
+          <button type="button" data-v="rouge" style="--c:#e63c2e" aria-label="Rouge"></button>
+          <button type="button" data-v="vert" style="--c:#4ff0b0" aria-label="Vert"></button>
+          <button type="button" data-v="ambre" style="--c:#ffb547" aria-label="Ambre"></button>
+          <button type="button" data-v="violet" style="--c:#a993ff" aria-label="Violet"></button>
+        </div>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>Ville de la météo</legend>
+        <form class="input-row city" id="set-city">
+          <input type="text" id="set-city-input" placeholder="Nice" autocomplete="address-level2">
+          <button type="submit" class="small-btn">Changer</button>
+        </form>
+        <p class="field-note" id="set-city-note"></p>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>Voix</legend>
+        <div class="seg" id="set-genre-voix" role="group" aria-label="Voix de l'assistant">
+          <button type="button" data-v="homme">Voix d'homme</button>
+          <button type="button" data-v="femme">Voix de femme</button>
+        </div>
+        <label class="switch-row">
+          <span>Lire les réponses à voix haute</span>
+          <input type="checkbox" id="set-voix" role="switch">
+        </label>
+        <label class="switch-row">
+          <span>M'accueillir à voix haute à la connexion</span>
+          <input type="checkbox" id="set-accueil" role="switch">
+        </label>
+        <label class="switch-row">
+          <span>Sons de l'interface</span>
+          <input type="checkbox" id="set-sons" role="switch">
+        </label>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>Musique</legend>
+        <label class="switch-row">
+          <span>Lancer la musique à l'ouverture</span>
+          <input type="checkbox" id="set-musique-auto" role="switch">
+        </label>
+        <label class="file-row">
+          <input type="file" id="set-mp3" accept=".mp3,.m4a,.ogg,audio/mpeg,audio/mp4,audio/ogg">
+          <span class="small-btn">Choisir un MP3</span>
+          <span class="field-note" id="mp3-note" aria-live="polite">Gardé pour les prochaines ouvertures. Un seul morceau, 10 Mo au plus : un nouveau remplace l'ancien.</span>
+        </label>
+      </fieldset>
+
+      <fieldset class="field" id="field-securite" hidden>
+        <legend>Sécurité</legend>
+        <div class="switch-row">
+          <span id="etat-2fa">Double authentification</span>
+          <a class="small-btn" href="/securite">Gérer</a>
+        </div>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>Garde-fous</legend>
+        <ul class="guard-list" id="guard-list"></ul>
+      </fieldset>
+
+      <button type="button" class="small-btn" id="logout" hidden>Se déconnecter</button>
+    </div>
+  </aside>
+
+  <!-- rappel tant que la double authentification n'est pas activée (mode « plus tard ») -->
+  <div class="rappel-2fa" id="rappel-2fa" role="status" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.3 7.5 9.5 4.3-1.2 7.5-4.9 7.5-9.5V6Z"/><path d="M12 9v4M12 16.2v.3"/></svg>
+    <span id="rappel-2fa-texte"></span>
+    <a href="/securite">Activer</a>
+    <button type="button" id="rappel-2fa-fermer" aria-label="Plus tard">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+    </button>
+  </div>
+
+  <script type="module" src="app.js?v=66"></script>
+</body>
+</html>

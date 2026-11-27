@@ -1,0 +1,6 @@
+interface:
+  display_name: "Ottho Jarvis : installer"
+  short_description: "Ton assistant personnel sur ton VPS, étape par étape"
+  default_prompt: "Installe mon assistant personnel sur mon VPS avec $installer."
+policy:
+  allow_implicit_invocation: true

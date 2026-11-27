@@ -1,0 +1,7 @@
+# Le kit tourne sur des serveurs Linux : fins de ligne LF partout.
+* text=auto eol=lf
+*.png binary
+*.mp3 binary
+*.safetensors binary
+*.wav binary
+*.ico binary

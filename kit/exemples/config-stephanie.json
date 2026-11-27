@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "assistant": { "nom": "Jarvis" },
+  "utilisateur": { "prenom": "Stéphanie", "adresse": "civilite", "civilite": "Madame", "tutoiement": false },
+  "ton": "equilibre",
+  "accent": "cyan",
+  "voix": false,
+  "ville": { "nom": "Nice", "lat": 43.7031, "lon": 7.2661, "fuseau": "Europe/Paris" },
+  "second_cerveau": { "actif": true, "chemin": "/srv/second-cerveau/savoir" },
+  "brief": {
+    "heure": "07:30",
+    "rubriques": [
+      { "id": "meteo", "titre": "Météo", "actif": true },
+      { "id": "rappels", "titre": "Rappels du jour", "actif": true },
+      { "id": "taches_veille", "titre": "Tâches notées la veille", "actif": true },
+      { "id": "actu_ia", "titre": "Actualité de l'IA", "actif": true }
+    ]
+  },
+  "point_du_soir": { "actif": true, "heure": "20:00" },
+  "garde_fous": [],
+  "telegram": { "actif": true, "utilisateurs": ["1000000001"] },
+  "interface": { "active": true, "domaine": "jarvis.srv1234567.hstgr.cloud", "certresolver": "letsencrypt", "entrypoint": "websecure" },
+  "hermes": {
+    "conteneur": "hermes-agent-abcd-hermes-agent-1",
+    "reseau": "hermes-agent-abcd_default",
+    "donnees": "/docker/hermes-agent-abcd/data",
+    "profil": "jarvis",
+    "port_api": 8642
+  }
+}

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#04080b">
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <title>{{NOM}}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root { --bg: #04080b; --text: #d6eef4; --muted: #58737c; --accent: #5fe1ff; --line: rgba(120, 220, 240, 0.22); }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+      background:
+        radial-gradient(60% 55% at 50% 42%, rgba(95, 225, 255, 0.08), transparent 70%),
+        linear-gradient(rgba(120, 220, 240, 0.035) 1px, transparent 1px) 0 0 / 48px 48px,
+        linear-gradient(90deg, rgba(120, 220, 240, 0.035) 1px, transparent 1px) 0 0 / 48px 48px,
+        var(--bg);
+      color: var(--text); font: 400 15px/1.5 "Space Grotesk", system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+    }
+    main { width: min(360px, 100%); text-align: center; }
+    .mark { width: 44px; height: 44px; color: var(--accent); filter: drop-shadow(0 0 10px rgba(95, 225, 255, 0.5)); }
+    .name { display: block; margin: 14px 0 4px; font: 500 14px/1 "JetBrains Mono", monospace; letter-spacing: 0.32em; }
+    h1 { margin: 28px 0 8px; font: 400 40px/1.05 "Instrument Serif", Georgia, serif; }
+    h1 em { color: var(--accent); }
+    p { margin: 0 0 28px; color: var(--muted); font-size: 14px; }
+    form { display: flex; gap: 8px; padding: 6px; border: 1px solid var(--line); border-radius: 999px; background: rgba(8, 18, 24, 0.85); }
+    form:focus-within { border-color: rgba(95, 225, 255, 0.5); box-shadow: 0 0 0 4px rgba(95, 225, 255, 0.08); }
+    input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: inherit; font: inherit; font-size: 16px; padding: 8px 14px; }
+    input::placeholder { color: var(--muted); }
+    input[hidden] { display: none; }
+    input:focus-visible { outline: none; }   /* le contour du formulaire suffit */
+    #code { font-family: "JetBrains Mono", monospace; letter-spacing: 0.2em; }
+    button { flex: none; width: 42px; height: 42px; border-radius: 50%; border: 0; cursor: pointer; background: var(--accent); color: #022029; display: grid; place-items: center; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .err { min-height: 20px; margin-top: 14px; color: #ff8a98; font-size: 13px; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* même préchargeur que l'interface : il prend le relais dès que le mot de passe est accepté */
+    #preloader { position: fixed; inset: 0; display: grid; place-items: center; background: radial-gradient(60% 55% at 50% 45%, rgba(95, 225, 255, 0.08), transparent 70%), #04080b; color: var(--accent); opacity: 0; visibility: hidden; transition: opacity 0.35s ease; }
+    body.entree #preloader { opacity: 1; visibility: visible; }
+    .pl { display: grid; justify-items: center; gap: 18px; }
+    .pl-anneau { position: relative; width: 88px; height: 88px; }
+    .pl-anneau svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .pl-tour { animation: pl-tour 1.6s linear infinite; transform-origin: 50% 50%; will-change: transform; }
+    .pl-nom { font: 500 13px/1 "JetBrains Mono", monospace; letter-spacing: 0.34em; color: var(--text); padding-left: 0.34em; }
+    .pl-ligne { display: flex; align-items: center; gap: 12px; }
+    .pl-barre { width: 160px; height: 2px; background: rgba(120, 220, 240, 0.15); overflow: hidden; border-radius: 2px; }
+    .pl-barre i { display: block; width: 100%; height: 100%; background: var(--accent); transform: scaleX(0); transform-origin: left center; }
+    .pl-pct { min-width: 4.2ch; font: 500 11px/1 "JetBrains Mono", monospace; color: #8fdcf0; text-align: right; }
+    @keyframes pl-tour { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body data-tu="{{TUTOIEMENT}}">
+  <main>
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M16 2.5 27.7 9.25v13.5L16 29.5 4.3 22.75V9.25Z" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <circle cx="16" cy="16" r="4.2" fill="currentColor"/>
+    </svg>
+    <span class="name">{{NOM_MAJ}}</span>
+    <!-- salutation neutre : la page est visible sans connexion, elle ne dit rien de la personne -->
+    <h1><em>Bonjour.</em></h1>
+    <p id="consigne">{{CONSIGNE}}</p>
+    <form id="f">
+      <input id="mdp" type="password" autocomplete="current-password" placeholder="Mot de passe" aria-label="Mot de passe" required autofocus>
+      <!-- 2e étape si la double authentification est activée -->
+      <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="Code à 6 chiffres" aria-label="Code à 6 chiffres ou code de secours" maxlength="9" hidden>
+      <button type="submit" aria-label="Entrer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6.5 18.5 12 13 17.5"/></svg></button>
+    </form>
+    <div class="err" id="err" role="alert"></div>
+  </main>
+  <div id="preloader" aria-hidden="true">
+    <div class="pl">
+      <div class="pl-anneau">
+        <svg class="pl-tour" viewBox="0 0 88 88"><circle cx="44" cy="44" r="42" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="66 198" stroke-linecap="round"/></svg>
+        <svg viewBox="0 0 88 88"><circle cx="44" cy="44" r="42" fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/></svg>
+        <svg viewBox="0 0 88 88"><path d="M44 28 57.9 36v16L44 60l-13.9-8V36Z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="44" cy="44" r="4.6" fill="currentColor"/></svg>
+      </div>
+      <span class="pl-nom">{{NOM_MAJ}}</span>
+      <span class="pl-ligne"><span class="pl-barre"><i></i></span><span class="pl-pct">0 %</span></span>
+    </div>
+  </div>
+  <script src="/connexion.js"></script>
+</body>
+</html>
